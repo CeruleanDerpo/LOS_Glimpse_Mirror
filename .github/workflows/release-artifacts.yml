@@ -1,0 +1,98 @@
+name: Download and Release Glimpse
+
+# Controls when the workflow will run
+on:
+  schedule:
+    # * is a special character in YAML so you have to quote this string
+    - cron:  '3 0 * * *' #UTC
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get apk from latest Github Artifact
+        env:
+          GH_PAT: ${{ secrets.PAT_GITHUB_ACTION }}
+        run: |
+          SOURCE_REPO="LineageOS/android_packages_apps_Glimpse"
+          INITIAL_NAME="app-debug.apk"
+          APK_NAME="Glimpse.apk"
+          ARTIFACTS=$(curl -L \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: Bearer $GH_PAT" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          https://api.github.com/repos/${SOURCE_REPO}/actions/artifacts)
+          
+          # Output the filename to the environment
+          echo "filename=${APK_NAME}" >> $GITHUB_ENV
+          
+          # Get latest artifact
+          DOWNLOAD_URL=$(echo $ARTIFACTS | jq -r '.artifacts[0].archive_download_url')
+
+          # Download and unzip the artifact
+          curl -L -o ${INITIAL_NAME}.zip -H "Authorization: Bearer $GH_PAT" $DOWNLOAD_URL
+          
+          # Unzip and rename
+          unzip ${INITIAL_NAME}.zip
+          mv ${INITIAL_NAME} ${APK_NAME}
+          
+      
+      - name: Store md5 hash of new apk
+        run: md5sum "${{ env.filename }}" | cut -d " " -f 1 > hash_new_file
+      
+      - name: Read current and new hash of apk
+        run: |
+          echo "current_hash=$(cat hash_current_file)" >> $GITHUB_ENV
+          echo "new_hash=$(cat hash_new_file)" >> $GITHUB_ENV
+      
+      - name: Record last update date and update current hash
+        if: ${{ env.current_hash != env.new_hash }}
+        run: |
+          date +%Y-%m-%d_%H-%M > last_update_date
+          echo "last_update_date_env=$(cat last_update_date)" >> $GITHUB_ENV
+          mv hash_new_file hash_current_file
+      
+      # https://code.whatever.social/questions/13469147/get-android-apk-file-versionname-or-versioncode-without-installing-apk
+      - name: Find version number
+        if: ${{ env.current_hash != env.new_hash }}
+        run: |
+          sudo apt install -y aapt
+          ls -alh
+          version=`aapt dump badging ${{ env.filename }} | grep -Po "(?<=\sversionName=')([0-9.]+)"`
+          echo "version=${version}" >> $GITHUB_ENV
+#          unzip -d apk_files ${{ env.filename }}
+#          echo "version=$(grep "Version" apk_files/assets/about.html | grep -oP '[0-9\.]+')" >> $GITHUB_ENV
+#          rm -rf apk_files
+      
+      - name: Write tag name
+        if: ${{ env.current_hash != env.new_hash }}
+        #run: echo "tagname=${{ env.version }}_${{ env.last_update_date_env }}" >> $GITHUB_ENV
+        run: |
+          ver="${{ env.version }}"
+          last_update="${{ env.last_update_date_env }}"
+          tagname="${ver}_${last_update}"
+          echo "tagname=${tagname}" >> $GITHUB_ENV
+      
+      - name: Commit and push the change
+        if: ${{ env.current_hash != env.new_hash }}
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: Update the apk, its hash, and update date
+        
+      - name: Release apk if hashes are different
+        if: ${{ env.current_hash != env.new_hash }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.tagname }}
+          body: "New version of Glimpse"
+          files: ${{ env.filename }}
+          token: ${{ secrets.PAT_GITHUB_ACTION }}
